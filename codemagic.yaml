@@ -100,58 +100,74 @@ workflows:
           $THEOS/bin/theos --version 2>/dev/null || echo "（theos 命令版本查询不支持，跳过）"
           ls -la "$THEOS_DIR/makefiles" | head -5
 
-      # ========== 步骤 3: 准备 iPhone SDK ==========
-      - name: Prepare iPhone SDK
-        script: |
-          #!/bin/bash
-          set -e
-          echo "=== [3/6] 准备 iPhone SDK ==="
+      # ========== 步骤 3: 准备 iPhone SDK =========# 
+- name: Prepare iPhone SDK
+  script: |
+    #!/bin/bash
+    set -e # 遇到错误立即退出
+    echo "=== [3/6] 准备 iPhone SDK ==="
 
-          export THEOS=$THEOS_PATH
-          SDK_DIR="$THEOS/sdks"
+    export THEOS=$THEOS_PATH
+    SDK_DIR="$THEOS/sdks"
+    REQUIRED_SDK_VERSION="16.5"
+    SDK_NAME="iPhoneOS${REQUIRED_SDK_VERSION}.sdk"
+    TEMP_DIR=$(mktemp -d) # 创建临时目录
 
-          # 查找 Xcode 中的 iPhone SDK
-          XCODE_PATH=$(xcode-select -p)
-          XCODE_ROOT=$(dirname $(dirname "$XCODE_PATH"))
-          SDK_SOURCE="$XCODE_ROOT/Platforms/iPhoneOS.platform/Developer/SDKs"
+    # 确保Theos的SDK目录存在
+    mkdir -p "$SDK_DIR"
 
-          echo "Xcode 路径: $XCODE_PATH"
-          echo "SDK 源路径: $SDK_SOURCE"
+    echo "目标SDK: $SDK_NAME"
+    echo "Theos SDK目录: $SDK_DIR"
+    echo "临时工作目录: $TEMP_DIR"
 
-          # 列出可用的 SDK
-          echo "可用 SDK："
-          ls -la "$SDK_SOURCE/" 2>/dev/null || echo "未找到 SDK 源目录"
+    # 检查SDK是否已存在
+    if [ -d "$SDK_DIR/$SDK_NAME" ]; then
+      echo "✅ SDK $SDK_NAME 已存在，跳过下载。"
+      rm -rf "$TEMP_DIR"
+      exit 0
+    fi
 
-          # 如果 Theos sdks 目录不存在，创建并链接
-          mkdir -p "$SDK_DIR"
+    echo "📥 开始从 GitHub 下载 theos/sdks 仓库..."
 
-          # 查找最新的 iPhoneOS SDK
-          LATEST_SDK=$(ls -d "$SDK_SOURCE/iPhoneOS"*.sdk 2>/dev/null | sort -V | tail -1)
-          if [ -z "$LATEST_SDK" ]; then
-            echo "❌ 未找到 iPhoneOS SDK，尝试从 Xcode 下载"
-            xcodebuild -downloadPlatform iOS || true
-            LATEST_SDK=$(ls -d "$SDK_SOURCE/iPhoneOS"*.sdk 2>/dev/null | sort -V | tail -1)
-          fi
+    # 克隆仓库到临时目录，--depth 1 只克隆最新提交，加快速度
+    if git clone --depth 1 https://github.com/theos/sdks.git "$TEMP_DIR/sdks"; then
+      echo "✅ 仓库克隆成功。"
+    else
+      echo "❌ 克隆仓库失败。请检查网络连接或GitHub仓库状态。"
+      rm -rf "$TEMP_DIR"
+      exit 1
+    fi
 
-          if [ -z "$LATEST_SDK" ]; then
-            echo "❌ 仍然未找到 SDK，尝试使用 Theos 的 SDK 下载脚本"
-            cd "$THEOS"
-            ./scripts/get-sdks || true
-          else
-            SDK_NAME=$(basename "$LATEST_SDK")
-            TARGET_LINK="$SDK_DIR/$SDK_NAME"
+    # 检查克隆的仓库中是否包含所需的SDK
+    if [ -d "$TEMP_DIR/sdks/$SDK_NAME" ]; then
+      echo "✅ 在仓库中找到了 $SDK_NAME。"
+      echo "📦 正在将 SDK 复制到 $SDK_DIR..."
+      # 使用cp命令复制整个目录
+      cp -R "$TEMP_DIR/sdks/$SDK_NAME" "$SDK_DIR/"
+      echo "✅ SDK 复制完成。"
+    else
+      echo "❌ 在克隆的仓库中未找到 $SDK_NAME。"
+      echo "   仓库可能不包含此版本的SDK，或者结构已发生变化。"
+      echo "   请检查: https://github.com/theos/sdks"
+      rm -rf "$TEMP_DIR"
+      exit 1
+    fi
 
-            if [ -L "$TARGET_LINK" ] || [ -d "$TARGET_LINK" ]; then
-              echo "SDK 已链接: $TARGET_LINK"
-            else
-              echo "链接 SDK: $LATEST_SDK -> $TARGET_LINK"
-              ln -s "$LATEST_SDK" "$TARGET_LINK"
-            fi
-          fi
+    # 清理临时文件
+    echo "🧹 清理临时文件..."
+    rm -rf "$TEMP_DIR"
 
-          # 列出 Theos sdks 目录
-          echo "Theos SDKs 目录："
-          ls -la "$SDK_DIR/"
+    # 最终验证
+    echo "🔍 最终验证 Theos SDKs 目录："
+    ls -la "$SDK_DIR/"
+
+    if [ -d "$SDK_DIR/$SDK_NAME" ]; then
+      echo "✅ SDK $SDK_NAME 准备完成，可用于编译。"
+    else
+      echo "❌ SDK $SDK_NAME 准备失败。"
+      exit 1
+    fi
+
 
       # ========== 步骤 4: 编译 Tweak ==========
       - name: Build YouTubiliDanmaku
