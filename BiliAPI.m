@@ -2,16 +2,18 @@
 //  BiliAPI.m
 //  YouTubiliDanmaku
 //
-//  Bilibili API 客户端实现
+//  Bilibili API 客户端实现 (基于 bilibili-API-collect 更新)
 //
 
 #import "BiliAPI.h"
 #import <zlib.h>
+#import <CommonCrypto/CommonDigest.h>
 
-// Bilibili API 端点
+// Bilibili API 端点 (使用新版 WBI 接口)
 static NSString *const kBiliSearchAPI = @"https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=%@&page=1&page_size=20";
 static NSString *const kBiliViewAPI   = @"https://api.bilibili.com/x/web-interface/view?bvid=%@";
-static NSString *const kBiliDanmakuAPI = @"https://api.bilibili.com/x/v2/dm/web/seg.so?type=1&oid=%@&segment_index=1";
+// 新版弹幕接口，需要 WBI 签名
+static NSString *const kBiliDanmakuAPI = @"https://api.bilibili.com/x/v2/dm/wbi/web/seg.so?type=1&oid=%@&segment_index=1";
 
 // 默认请求头
 static NSString *const kUserAgent = @"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1";
@@ -20,20 +22,25 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
 #pragma mark - BiliAPI 私有接口
 
 @interface BiliAPI ()
-// buvid3（Bilibili 风控标识）
 @property (nonatomic, copy) NSString *buvid3;
+// WBI 签名相关
+@property (nonatomic, copy) NSString *imgKey;
+@property (nonatomic, copy) NSString *subKey;
+@property (nonatomic, strong) NSDate *keyUpdateTime;
 // 私有方法声明
 - (NSString *)generateBuvid3;
 - (NSMutableURLRequest *)makeRequestWithURL:(NSString *)urlString;
 - (NSString *)decodeHTML:(NSString *)s;
-- (NSData *)deflateDecompress:(NSData *)compressed;
+- (NSData *)gzipDecompress:(NSData *)compressed;
 - (NSString *)cleanTitleForSearch:(NSString *)title channel:(NSString *)channel;
 - (NSArray<Danmaku *> *)parseProtobufDanmaku:(NSData *)data;
 - (NSArray<Danmaku *> *)parseXMLDanmaku:(NSData *)data;
 - (Danmaku *)parseDanmakuElem:(NSData *)data;
 - (NSUInteger)readVarint:(const uint8_t *)bytes pos:(NSUInteger *)pos length:(NSUInteger)length;
-// 修复：将参数类型从 NSUInteger * 修改为 NSUInteger
 - (NSUInteger)skipField:(const uint8_t *)bytes pos:(NSUInteger)pos length:(NSUInteger)length wireType:(int)wireType;
+// WBI 签名方法
+- (void)refreshWBIKeysWithCompletion:(void (^)(BOOL success))completion;
+- (NSString *)wbiSign:(NSDictionary *)params;
 @end
 
 #pragma mark - XML 解析器（旧版 XML 弹幕格式）
@@ -123,6 +130,9 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
     if (self) {
         _cookie = @"";
         _buvid3 = [self generateBuvid3];
+        _imgKey = @"";
+        _subKey = @"";
+        _keyUpdateTime = [NSDate distantPast];
     }
     return self;
 }
@@ -153,13 +163,13 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
     [request setValue:kReferer forHTTPHeaderField:@"Referer"];
     [request setValue:@"application/json, text/plain, */*" forHTTPHeaderField:@"Accept"];
     [request setValue:@"zh-CN,zh;q=0.9" forHTTPHeaderField:@"Accept-Language"];
+    [request setValue:@"gzip, deflate" forHTTPHeaderField:@"Accept-Encoding"];
 
     // Cookie
     NSString *cookie = self.cookie;
     if (cookie.length > 0) {
         [request setValue:cookie forHTTPHeaderField:@"Cookie"];
     } else {
-        // 匿名访问也带上 buvid3
         [request setValue:[NSString stringWithFormat:@"buvid3=%@", _buvid3] forHTTPHeaderField:@"Cookie"];
     }
 
@@ -180,11 +190,20 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
 }
 
 /**
- * deflate-raw 解压缩
- * Bilibili 的 seg.so 接口返回的是 raw deflate 压缩的 protobuf 数据
+ * gzip 解压缩 (支持 raw deflate 和 gzip)
+ * Bilibili 的 seg.so 接口返回的是 gzip 压缩的 protobuf 数据
  */
-- (NSData *)deflateDecompress:(NSData *)compressed {
+- (NSData *)gzipDecompress:(NSData *)compressed {
     if (!compressed || compressed.length == 0) return nil;
+
+    // 检查是否是 gzip 格式 (0x1F 0x8B)
+    BOOL isGzip = NO;
+    if (compressed.length >= 2) {
+        const uint8_t *bytes = compressed.bytes;
+        if (bytes[0] == 0x1F && bytes[1] == 0x8B) {
+            isGzip = YES;
+        }
+    }
 
     z_stream stream;
     memset(&stream, 0, sizeof(stream));
@@ -192,8 +211,8 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
     stream.next_in = (Bytef *)compressed.bytes;
     stream.avail_in = (uInt)compressed.length;
 
-    // windowBits = -15 表示 raw deflate（无 zlib 头）
-    if (inflateInit2(&stream, -15) != Z_OK) {
+    int windowBits = isGzip ? 16 + 15 : -15; // gzip 自动检测 或 raw deflate
+    if (inflateInit2(&stream, windowBits) != Z_OK) {
         NSLog(@"[YouTubili] inflateInit2 failed");
         return nil;
     }
@@ -224,12 +243,100 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
     return output.length > 0 ? output : nil;
 }
 
+#pragma mark - WBI 签名 (参考 bilibili-API-collect)
+
+- (void)refreshWBIKeysWithCompletion:(void (^)(BOOL success))completion {
+    // 如果 key 在 10 分钟内更新过且有效，直接返回成功
+    if (self.imgKey.length > 0 && self.subKey.length > 0 &&
+        [[NSDate date] timeIntervalSinceDate:self.keyUpdateTime] < 600) {
+        if (completion) completion(YES);
+        return;
+    }
+
+    NSString *urlStr = @"https://api.bilibili.com/x/web-interface/nav";
+    NSMutableURLRequest *request = [self makeRequestWithURL:urlStr];
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
+                                                                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error || !data) {
+            if (completion) completion(NO);
+            return;
+        }
+
+        NSError *jsonError;
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+        if (jsonError || !json) {
+            if (completion) completion(NO);
+            return;
+        }
+
+        NSDictionary *wbiImg = json[@"data"][@"wbi_img"];
+        if (!wbiImg) {
+            if (completion) completion(NO);
+            return;
+        }
+
+        NSString *imgUrl = wbiImg[@"img_url"];
+        NSString *subUrl = wbiImg[@"sub_url"];
+        if (!imgUrl || !subUrl) {
+            if (completion) completion(NO);
+            return;
+        }
+
+        // 从 URL 中提取 key (文件名不含扩展名)
+        self.imgKey = [[imgUrl lastPathComponent] stringByDeletingPathExtension];
+        self.subKey = [[subUrl lastPathComponent] stringByDeletingPathExtension];
+        self.keyUpdateTime = [NSDate date];
+
+        NSLog(@"[YouTubili] WBI Keys refreshed: imgKey=%@, subKey=%@", self.imgKey, self.subKey);
+        if (completion) completion(YES);
+    }];
+
+    [task resume];
+}
+
+- (NSString *)wbiSign:(NSDictionary *)params {
+    if (self.imgKey.length == 0 || self.subKey.length == 0) {
+        // 如果没有 key，返回空签名（部分接口可能不需要）
+        return @"";
+    }
+
+    // 1. 拼接 imgKey + subKey
+    NSString *mixKey = [NSString stringWithFormat:@"%@%@", self.imgKey, self.subKey];
+
+    // 2. 参数按 key 排序
+    NSArray *sortedKeys = [[params allKeys] sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableArray *kvPairs = [NSMutableArray array];
+    for (NSString *key in sortedKeys) {
+        id value = params[key];
+        if ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSNumber class]]) {
+            [kvPairs addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
+        }
+    }
+
+    // 3. 拼接参数字符串
+    NSString *queryString = [kvPairs componentsJoinedByString:@"&"];
+
+    // 4. 拼接 mixKey 并计算 MD5
+    NSString *signString = [NSString stringWithFormat:@"%@%@", queryString, mixKey];
+    const char *cStr = [signString UTF8String];
+    unsigned char digest[CC_MD5_DIGEST_LENGTH];
+    CC_MD5(cStr, (CC_LONG)strlen(cStr), digest);
+
+    NSMutableString *md5 = [NSMutableString stringWithCapacity:CC_MD5_DIGEST_LENGTH * 2];
+    for (int i = 0; i < CC_MD5_DIGEST_LENGTH; i++) {
+        [md5 appendFormat:@"%02x", digest[i]];
+    }
+
+    return md5;
+}
+
 #pragma mark - 搜索视频
 
 - (void)searchVideoWithTitle:(NSString *)title
                      channel:(NSString *)channel
                   completion:(void (^)(NSArray<BiliSearchResult *> *results, NSError *error))completion {
-    // 清理标题：去除括号内容、官方 MV 标记等
+    // 清理标题
     NSString *keyword = [self cleanTitleForSearch:title channel:channel];
 
     NSString *encoded = [keyword stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
@@ -307,44 +414,34 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
 - (NSString *)cleanTitleForSearch:(NSString *)title channel:(NSString *)channel {
     NSMutableString *s = [title mutableCopy];
 
-    // 去除括号内容
-    NSArray *patterns = @[@"（", @"(", @"【", @"[", @"「"];
-    for (NSString *p in patterns) {
-        NSRange r = [s rangeOfString:p];
-        if (r.location != NSNotFound) {
-            [s deleteCharactersInRange:NSMakeRange(r.location, s.length - r.location)];
+    // 去除括号内容 - 修复：只去除括号及其内部内容，而不是截断后面所有字符
+    NSArray *patterns = @[@[@"（", @"）"], @[@"(", @")"], @[@"【", @"】"], @[@"[", @"]"], @[@"「", @"」"]];
+    for (NSArray *pair in patterns) {
+        NSString *open = pair[0];
+        NSString *close = pair[1];
+        NSRange openRange = [s rangeOfString:open];
+        if (openRange.location != NSNotFound) {
+            NSRange closeRange = [s rangeOfString:close options:0 range:NSMakeRange(openRange.location, s.length - openRange.location)];
+            if (closeRange.location != NSNotFound) {
+                [s deleteCharactersInRange:NSMakeRange(openRange.location, closeRange.location - openRange.location + 1)];
+            }
         }
     }
 
     // 去除常见后缀
     NSArray *suffixes = @[@" - YouTube", @" | YouTube", @" Official Video", @" MV", @" M/V", @" Official MV"];
     for (NSString *suffix in suffixes) {
-        if ([s hasSuffix:suffix]) {
-            [s deleteCharactersInRange:NSMakeRange(s.length - suffix.length, suffix.length)];
+        NSRange range = [s rangeOfString:suffix options:NSCaseInsensitiveSearch | NSBackwardsSearch];
+        if (range.location != NSNotFound && range.location + range.length == s.length) {
+            [s deleteCharactersInRange:range];
         }
     }
 
-    // 去除 emoji 和特殊字符
-    NSMutableString *cleaned = [NSMutableString string];
-    for (NSInteger i = 0; i < s.length; i++) {
-        unichar c = [s characterAtIndex:i];
-        if (c >= 0x20 && c <= 0x7E) {
-            [cleaned appendFormat:@"%C", c];
-        } else if (c >= 0x4E00 && c <= 0x9FFF) {
-            // CJK 统一汉字
-            [cleaned appendFormat:@"%C", c];
-        } else if (c >= 0x3040 && c <= 0x30FF) {
-            // 平假名 + 片假名
-            [cleaned appendFormat:@"%C", c];
-        } else if (c >= 0xAC00 && c <= 0xD7AF) {
-            // 韩文
-            [cleaned appendFormat:@"%C", c];
-        } else if (c == 0x20) {
-            [cleaned appendFormat:@"%C", c];
-        }
-    }
-
-    NSString *result = [cleaned stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    // 去除多余空格
+    NSString *result = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    // 合并多个空格
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\s+" options:0 error:nil];
+    result = [regex stringByReplacingMatchesInString:result options:0 range:NSMakeRange(0, result.length) withTemplate:@" "];
 
     // 如果标题太短，加上频道名
     if (result.length < 3 && channel.length > 0) {
@@ -357,9 +454,9 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
 #pragma mark - 获取视频信息
 
 - (void)fetchVideoInfoWithBVID:(NSString *)bvid
-                    completion:(void (^)(NSString *cid, NSString *title, NSTimeInterval duration, NSError *error))completion {
+                    completion:(void (^)(NSString *cid, NSString *title, NSTimeInterval duration, NSString *token, NSError *error))completion {
     if (!bvid || bvid.length == 0) {
-        if (completion) completion(nil, nil, 0, [NSError errorWithDomain:@"BiliAPI" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"BVID is empty"}]);
+        if (completion) completion(nil, nil, 0, nil, [NSError errorWithDomain:@"BiliAPI" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"BVID is empty"}]);
         return;
     }
 
@@ -369,21 +466,21 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
                                                                  completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error || !data) {
-            if (completion) completion(nil, nil, 0, error);
+            if (completion) completion(nil, nil, 0, nil, error);
             return;
         }
 
         NSError *jsonError;
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
         if (jsonError || !json) {
-            if (completion) completion(nil, nil, 0, jsonError);
+            if (completion) completion(nil, nil, 0, nil, jsonError);
             return;
         }
 
         NSNumber *code = json[@"code"];
         if (![code isEqualToNumber:@0]) {
             NSString *msg = json[@"message"] ?: @"Bilibili API error";
-            if (completion) completion(nil, nil, 0, [NSError errorWithDomain:@"BiliAPI" code:code.intValue userInfo:@{NSLocalizedDescriptionKey: msg}]);
+            if (completion) completion(nil, nil, 0, nil, [NSError errorWithDomain:@"BiliAPI" code:code.intValue userInfo:@{NSLocalizedDescriptionKey: msg}]);
             return;
         }
 
@@ -391,82 +488,112 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
         NSString *cid = [NSString stringWithFormat:@"%@", dataDict[@"cid"]];
         NSString *title = dataDict[@"title"];
         NSTimeInterval duration = [dataDict[@"duration"] doubleValue];
+        NSString *token = dataDict[@"token"] ?: @""; // 从 view 接口获取 token
 
-        NSLog(@"[YouTubili] Video info: cid=%@, title=%@, duration=%.0f", cid, title, duration);
+        NSLog(@"[YouTubili] Video info: cid=%@, title=%@, duration=%.0f, token=%@", cid, title, duration, token);
 
-        if (completion) completion(cid, title, duration, nil);
+        if (completion) completion(cid, title, duration, token, nil);
     }];
 
     [task resume];
 }
 
-#pragma mark - 获取弹幕
+#pragma mark - 获取弹幕 (使用新版 WBI 接口)
 
 - (void)fetchDanmakuWithCID:(NSString *)cid
+                      token:(NSString *)token
                  completion:(void (^)(NSArray<Danmaku *> *danmakus, NSError *error))completion {
     if (!cid || cid.length == 0) {
         if (completion) completion(@[], [NSError errorWithDomain:@"BiliAPI" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"CID is empty"}]);
         return;
     }
 
-    NSString *urlStr = [NSString stringWithFormat:kBiliDanmakuAPI, cid];
-    NSMutableURLRequest *request = [self makeRequestWithURL:urlStr];
-
-    NSLog(@"[YouTubili] Fetching danmaku: %@", urlStr);
-
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-                                                                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error || !data) {
-            if (completion) completion(@[], error);
-            return;
+    // 先刷新 WBI keys
+    [self refreshWBIKeysWithCompletion:^(BOOL success) {
+        // 构建基础参数
+        NSMutableDictionary *params = [NSMutableDictionary dictionary];
+        params[@"type"] = @"1";
+        params[@"oid"] = cid;
+        params[@"segment_index"] = @"1";
+        if (token.length > 0) {
+            params[@"token"] = token;
         }
 
-        // 尝试直接解析为 protobuf（seg.so 接口可能未压缩）
-        NSArray<Danmaku *> *danmakus = [self parseProtobufDanmaku:data];
+        // 生成 WBI 签名
+        NSString *wbiSign = [self wbiSign:params];
+        if (wbiSign.length > 0) {
+            params[@"w_rid"] = wbiSign;
+            params[@"wts"] = @((long long)[[NSDate date] timeIntervalSince1970]);
+        }
 
-        if (danmakus.count == 0) {
-            // 尝试 deflate 解压后再解析 protobuf
-            NSData *decompressed = [self deflateDecompress:data];
-            if (decompressed) {
-                danmakus = [self parseProtobufDanmaku:decompressed];
+        // 构建 URL
+        NSMutableString *urlStr = [NSMutableString stringWithString:kBiliDanmakuAPI];
+        // 替换 oid 占位
+        NSString *baseURL = [NSString stringWithFormat:kBiliDanmakuAPI, cid];
+        urlStr = [NSMutableString stringWithString:baseURL];
+
+        // 添加其他参数
+        NSMutableArray *queryItems = [NSMutableArray array];
+        for (NSString *key in params) {
+            if ([key isEqualToString:@"oid"]) continue; // 已在 URL 中
+            [queryItems addObject:[NSString stringWithFormat:@"%@=%@", key, params[key]]];
+        }
+        if (queryItems.count > 0) {
+            [urlStr appendFormat:@"&%@", [queryItems componentsJoinedByString:@"&"]];
+        }
+
+        NSMutableURLRequest *request = [self makeRequestWithURL:urlStr];
+
+        NSLog(@"[YouTubili] Fetching danmaku: %@", urlStr);
+
+        NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
+                                                                     completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            if (error || !data) {
+                if (completion) completion(@[], error);
+                return;
             }
-        }
 
-        if (danmakus.count == 0) {
-            // 尝试解析为 XML（旧版接口）
-            danmakus = [self parseXMLDanmaku:data];
-        }
+            // 检查是否是 JSON 错误响应
+            if (data.length > 0) {
+                NSString *preview = [[NSString alloc] initWithData:[data subdataWithRange:NSMakeRange(0, MIN(200, data.length))]
+                                                         encoding:NSUTF8StringEncoding];
+                if ([preview containsString:@"\"code\""] && [preview containsString:@"\"message\""]) {
+                    NSError *jsonError;
+                    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+                    if (!jsonError && json) {
+                        NSNumber *code = json[@"code"];
+                        if (![code isEqualToNumber:@0]) {
+                            NSString *msg = json[@"message"] ?: @"Bilibili API error";
+                            NSLog(@"[YouTubili] Danmaku API error: %@ (%@)", msg, code);
+                            if (completion) completion(@[], [NSError errorWithDomain:@"BiliAPI" code:code.intValue userInfo:@{NSLocalizedDescriptionKey: msg}]);
+                            return;
+                        }
+                    }
+                }
+            }
 
-        NSLog(@"[YouTubili] Parsed %lu danmakus", (unsigned long)danmakus.count);
-        if (completion) completion(danmakus, nil);
+            // 尝试 gzip 解压 (新接口返回 gzip 压缩的 protobuf)
+            NSData *decompressed = [self gzipDecompress:data];
+            NSData *protobufData = decompressed ?: data;
+
+            // 解析 protobuf
+            NSArray<Danmaku *> *danmakus = [self parseProtobufDanmaku:protobufData];
+
+            if (danmakus.count == 0) {
+                // 尝试解析为 XML（旧版接口兼容）
+                danmakus = [self parseXMLDanmaku:data];
+            }
+
+            NSLog(@"[YouTubili] Parsed %lu danmakus", (unsigned long)danmakus.count);
+            if (completion) completion(danmakus, nil);
+        }];
+
+        [task resume];
     }];
-
-    [task resume];
 }
 
 #pragma mark - Protobuf 解析
 
-/**
- * 解析 Bilibili 弹幕 protobuf 格式
- * 消息定义（简化）:
- * message DmSegMobileReply {
- *   repeated DanmakuElem elems = 1;
- * }
- * message DanmakuElem {
- *   int64 id = 1;
- *   int32 progress = 2;  // 毫秒
- *   int32 mode = 3;
- *   int32 fontsize = 4;
- *   uint32 color = 5;
- *   string midHash = 6;
- *   string content = 7;
- *   int64 ctime = 8;
- *   int32 weight = 9;
- *   string action = 10;
- *   int32 pool = 11;
- *   string idStr = 12;
- * }
- */
 - (NSArray<Danmaku *> *)parseProtobufDanmaku:(NSData *)data {
     NSMutableArray<Danmaku *> *results = [NSMutableArray array];
 
@@ -475,13 +602,11 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
     NSUInteger pos = 0;
 
     while (pos < length) {
-        // 读取字段号和 wire type
         NSUInteger tag = [self readVarint:bytes pos:&pos length:length];
         int fieldNum = (int)(tag >> 3);
         int wireType = (int)(tag & 0x07);
 
         if (fieldNum == 1 && wireType == 2) {
-            // DanmakuElem 嵌套消息
             NSUInteger len = [self readVarint:bytes pos:&pos length:length];
             if (pos + len > length) break;
 
@@ -492,7 +617,6 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
             }
             pos += len;
         } else {
-            // 调用处传递的是值 pos，方法声明和实现也应匹配
             pos = [self skipField:bytes pos:pos length:length wireType:wireType];
             if (pos == 0 || pos > length) break;
         }
@@ -514,7 +638,6 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
         int wireType = (int)(tag & 0x07);
 
         if (fieldNum == 2 && wireType == 0) {
-            // progress (毫秒)
             NSUInteger progress = [self readVarint:bytes pos:&pos length:length];
             d.time = progress / 1000.0;
         } else if (fieldNum == 3 && wireType == 0) {
@@ -525,21 +648,18 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
             NSUInteger color = [self readVarint:bytes pos:&pos length:length];
             d.color = (uint32_t)color;
         } else if (fieldNum == 7 && wireType == 2) {
-            // content
             NSUInteger len = [self readVarint:bytes pos:&pos length:length];
             if (pos + len <= length) {
                 d.text = [[NSString alloc] initWithBytes:bytes + pos length:len encoding:NSUTF8StringEncoding];
             }
             pos += len;
         } else if (fieldNum == 12 && wireType == 2) {
-            // idStr
             NSUInteger len = [self readVarint:bytes pos:&pos length:length];
             if (pos + len <= length) {
                 d.dmid = [[NSString alloc] initWithBytes:bytes + pos length:len encoding:NSUTF8StringEncoding];
             }
             pos += len;
         } else {
-            // 调用处传递的是值 pos，方法声明和实现也应匹配
             pos = [self skipField:bytes pos:pos length:length wireType:wireType];
             if (pos == 0 || pos > length) break;
         }
@@ -563,26 +683,25 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
     return result;
 }
 
-// 方法实现：pos 是值类型
 - (NSUInteger)skipField:(const uint8_t *)bytes pos:(NSUInteger)pos length:(NSUInteger)length wireType:(int)wireType {
     switch (wireType) {
-        case 0: { // Varint
+        case 0: {
             while (pos < length) {
                 uint8_t b = bytes[pos++];
                 if ((b & 0x80) == 0) return pos;
             }
             return 0;
         }
-        case 1: { // 64-bit
+        case 1: {
             return pos + 8 <= length ? pos + 8 : 0;
         }
-        case 2: { // Length-delimited
+        case 2: {
             NSUInteger len = 0;
             NSUInteger p = pos;
             len = [self readVarint:bytes pos:&p length:length];
             return p + len <= length ? p + len : 0;
         }
-        case 5: { // 32-bit
+        case 5: {
             return pos + 4 <= length ? pos + 4 : 0;
         }
         default:
@@ -593,7 +712,6 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
 #pragma mark - XML 解析（旧版接口）
 
 - (NSArray<Danmaku *> *)parseXMLDanmaku:(NSData *)data {
-    // 检查是否是 XML
     NSString *preview = [[NSString alloc] initWithData:[data subdataWithRange:NSMakeRange(0, MIN(100, data.length))]
                                              encoding:NSUTF8StringEncoding];
     if (![preview containsString:@"<?xml"] && ![preview containsString:@"<i>"]) {
@@ -607,16 +725,16 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
     return parser.results;
 }
 
-#pragma mark - 一步获取弹幕
+#pragma mark - 一步获取弹幕 (使用新版 WBI 接口)
 
 - (void)fetchDanmakuForBVID:(NSString *)bvid
                 completion:(void (^)(NSArray<Danmaku *> *danmakus, NSError *error))completion {
-    [self fetchVideoInfoWithBVID:bvid completion:^(NSString *cid, NSString *title, NSTimeInterval duration, NSError *error) {
+    [self fetchVideoInfoWithBVID:bvid completion:^(NSString *cid, NSString *title, NSTimeInterval duration, NSString *token, NSError *error) {
         if (error || !cid) {
             if (completion) completion(@[], error);
             return;
         }
-        [self fetchDanmakuWithCID:cid completion:completion];
+        [self fetchDanmakuWithCID:cid token:token completion:completion];
     }];
 }
 
