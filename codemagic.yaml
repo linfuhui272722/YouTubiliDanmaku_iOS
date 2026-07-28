@@ -15,8 +15,8 @@ workflows:
         THEOS_PATH: "/Users/builder/theos"
         # SDK 版本（Codemagic 环境自带 Xcode，从中提取 SDK）
         SDK_VERSION: "iPhoneOS16.5.sdk"
-        # 目标架构
-        ARCHS: "arm64 arm64e"
+        # 目标架构 (修改为仅 arm64 以避免 fakeroot arm64e 兼容性问题)
+        ARCHS: "arm64"
         # deb 包版本号
         PACKAGE_VERSION: "1.0.0"
 
@@ -60,14 +60,42 @@ workflows:
             /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
           fi
 
-          # 安装编译所需工具
-          brew install ldid fakeroot dpkg || true
+          # 安装基础编译工具
+          brew install ldid dpkg || true
           brew install perl || true
 
-          # 验证工具
-          echo "已安装工具："
+          # ========== 更新 fakeroot 以解决架构兼容性问题 ==========
+          echo "=== 更新 fakeroot ==="
+          # 1. 卸载旧版本以避免架构冲突缓存
+          echo "卸载旧版 fakeroot..."
+          brew uninstall --ignore-dependencies fakeroot || true
+          
+          # 2. 清理 Homebrew 缓存，确保下载最新版本
+          echo "清理 Homebrew 缓存..."
+          brew cleanup --prune=all -s || true
+          
+          # 3. 安装最新版本
+          echo "安装最新版 fakeroot..."
+          brew install fakeroot || brew link --overwrite fakeroot || true
+
+          # 4. 验证安装和版本信息
+          if command -v fakeroot &> /dev/null; then
+            echo "✅ fakeroot 安装成功"
+            echo "   版本: $(fakeroot -v)"
+            echo "   路径: $(which fakeroot)"
+            # 检查二进制文件架构
+            echo "   架构信息:"
+            file $(which fakeroot)
+          else
+            echo "❌ fakeroot 安装失败。"
+            exit 1
+          fi
+          # ========== fakeroot 更新结束 ==========
+
+          # 验证其他工具
+          echo ""
+          echo "其他工具版本："
           command -v ldid && ldid -V || echo "ldid: 未找到"
-          command -v fakeroot && fakeroot -v || echo "fakeroot: 未找到"
           command -v dpkg-deb && dpkg-deb --version | head -1 || echo "dpkg-deb: 未找到"
 
       # ========== 步骤 2: 安装 Theos ==========
@@ -80,8 +108,7 @@ workflows:
           THEOS_DIR="$THEOS_PATH"
 
           if [ -d "$THEOS_DIR" ]; then
-            echo "Theos 已存在，跳过克隆"
-            # 更新到最新
+            echo "Theos 已存在，更新中..."
             cd "$THEOS_DIR" && git pull --rebase || true
           else
             echo "克隆 Theos..."
@@ -89,17 +116,15 @@ workflows:
             git clone --recursive https://github.com/theos/theos.git "$THEOS_DIR"
           fi
 
-          # 设置 Theos 环境变量（写入 profile）
+          # 设置 Theos 环境变量
           echo "export THEOS=$THEOS_DIR" >> ~/.bashrc
           echo "export PATH=\$THEOS/bin:\$PATH" >> ~/.bashrc
           export THEOS=$THEOS_DIR
           export PATH=$THEOS/bin:$PATH
 
           # 验证 Theos
-          echo "Theos 版本："
-          $THEOS/bin/theos --version 2>/dev/null || echo "（theos 命令版本查询不支持，跳过）"
+          echo "Theos 目录: $THEOS_DIR"
           ls -la "$THEOS_DIR/makefiles" | head -5
-
 
       # ========== 步骤 3: 准备 iPhone SDK (从网上下载) ==========
       - name: Prepare iPhone SDK
@@ -110,62 +135,45 @@ workflows:
 
           export THEOS=$THEOS_PATH
           SDK_DIR="$THEOS/sdks"
-          REQUIRED_SDK_VERSION="16.5" # 从环境变量SDK_VERSION中提取版本号（去掉前缀和后缀）
+          REQUIRED_SDK_VERSION="16.5" 
           SDK_NAME="iPhoneOS${REQUIRED_SDK_VERSION}.sdk"
-          TEMP_DIR=$(mktemp -d) # 创建临时目录
+          TEMP_DIR=$(mktemp -d)
 
-          # 确保Theos的SDK目录存在
           mkdir -p "$SDK_DIR"
 
           echo "目标SDK: $SDK_NAME"
-          echo "Theos SDK目录: $SDK_DIR"
-          echo "临时工作目录: $TEMP_DIR"
 
-          # 检查SDK是否已存在
           if [ -d "$SDK_DIR/$SDK_NAME" ]; then
             echo "✅ SDK $SDK_NAME 已存在，跳过下载。"
             rm -rf "$TEMP_DIR"
             exit 0
           fi
 
-          echo "📥 开始从 GitHub 下载 theos/sdks 仓库..."
-
-          # 克隆仓库到临时目录，--depth 1 只克隆最新提交，加快速度
+          echo "📥 下载 SDK..."
           if git clone --depth 1 https://github.com/theos/sdks.git "$TEMP_DIR/sdks"; then
             echo "✅ 仓库克隆成功。"
           else
-            echo "❌ 克隆仓库失败。请检查网络连接或GitHub仓库状态。"
+            echo "❌ 克隆仓库失败。"
             rm -rf "$TEMP_DIR"
             exit 1
           fi
 
-          # 检查克隆的仓库中是否包含所需的SDK
           if [ -d "$TEMP_DIR/sdks/$SDK_NAME" ]; then
-            echo "✅ 在仓库中找到了 $SDK_NAME。"
-            echo "📦 正在将 SDK 复制到 $SDK_DIR..."
-            # 使用cp命令复制整个目录
+            echo "✅ 找到 $SDK_NAME，正在复制..."
             cp -R "$TEMP_DIR/sdks/$SDK_NAME" "$SDK_DIR/"
             echo "✅ SDK 复制完成。"
           else
-            echo "❌ 在克隆的仓库中未找到 $SDK_NAME。"
-            echo "   仓库可能不包含此版本的SDK，或者结构已发生变化。"
-            echo "   请检查: https://github.com/theos/sdks"
+            echo "❌ 未找到 $SDK_NAME。"
             rm -rf "$TEMP_DIR"
             exit 1
           fi
 
-          # 清理临时文件
-          echo "🧹 清理临时文件..."
           rm -rf "$TEMP_DIR"
 
-          # 最终验证
-          echo "🔍 最终验证 Theos SDKs 目录："
-          ls -la "$SDK_DIR/"
-
           if [ -d "$SDK_DIR/$SDK_NAME" ]; then
-            echo "✅ SDK $SDK_NAME 准备完成，可用于编译。"
+            echo "✅ SDK $SDK_NAME 准备完成。"
           else
-            echo "❌ SDK $SDK_NAME 准备失败。"
+            echo "❌ SDK 准备失败。"
             exit 1
           fi
 
@@ -179,18 +187,19 @@ workflows:
           export THEOS=$THEOS_PATH
           export PATH=$THEOS/bin:$PATH
 
-          # 进入项目目录（Codemagic 默认 checkout 到 $CM_BUILD_DIR 或当前目录）
-          PROJECT_DIR="$CM_BUILD_DIR"
-          if [ -z "$PROJECT_DIR" ]; then
-            PROJECT_DIR=$(pwd)
-          fi
+          PROJECT_DIR="${CM_BUILD_DIR:-$(pwd)}"
           echo "项目目录: $PROJECT_DIR"
-
           cd "$PROJECT_DIR"
 
-          # 验证文件
-          echo "项目文件："
-          ls -la *.x *.m *.h Makefile *.plist control 2>/dev/null
+          # 显示环境变量（调试用）
+          echo "=== 当前环境变量 ==="
+          echo "THEOS: $THEOS"
+          echo "ARCHS: $ARCHS"
+          echo "SDK_VERSION: $SDK_VERSION"
+          
+          # 验证关键文件
+          echo "=== 项目文件 ==="
+          ls -la Tweak.x Makefile control *.plist 2>/dev/null || echo "部分文件缺失"
 
           # 清理旧构建
           echo "清理旧构建..."
@@ -198,30 +207,26 @@ workflows:
           rm -rf packages/ .theos/ obj/ 2>/dev/null || true
 
           # 编译
+          # 注意：ARCHS 已在环境变量中设置为 arm64
           echo "开始编译..."
           make package FINALPACKAGE=1
 
           # 验证 deb
           echo "=== 编译结果 ==="
           ls -la packages/ 2>/dev/null || {
-            echo "❌ packages/ 目录不存在，检查 .theos/obj/ 目录"
-            ls -la .theos/ 2>/dev/null
-            find . -name "*.dylib" -o -name "*.deb" 2>/dev/null
+            echo "❌ packages/ 目录不存在"
+            find . -name "*.deb" -o -name "*.dylib" 2>/dev/null
             exit 1
           }
 
           DEB_FILE=$(ls packages/*.deb 2>/dev/null | head -1)
           if [ -z "$DEB_FILE" ]; then
             echo "❌ 未找到 .deb 文件"
-            find . -name "*.deb" 2>/dev/null
             exit 1
           fi
 
           echo "✅ 编译成功: $DEB_FILE"
           dpkg-deb --info "$DEB_FILE"
-          echo ""
-          echo "=== deb 内容 ==="
-          dpkg-deb --contents "$DEB_FILE"
 
       # ========== 步骤 5: 重命名 deb（带版本号） ==========
       - name: Rename deb package
@@ -239,17 +244,13 @@ workflows:
             exit 1
           fi
 
-          # 重命名为带版本号的名称
-          NEW_NAME="packages/YouTubiliDanmaku_${PACKAGE_VERSION}_iphoneos-arm.deb"
+          NEW_NAME="packages/YouTubiliDanmaku_${PACKAGE_VERSION}_iphoneos-arm64.deb"
           cp "$DEB_FILE" "$NEW_NAME"
           echo "✅ 重命名为: $NEW_NAME"
           ls -la packages/
 
     # ========== 步骤 6: 构建产物 ==========
     artifacts:
-      # deb 安装包
       - packages/*.deb
-      # 编译日志（用于调试）
       - .theos/obj/**/*.log
-      # 如果有 dSYM
       - .theos/obj/**/*.dylib
