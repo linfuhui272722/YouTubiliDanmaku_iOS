@@ -24,20 +24,6 @@
 - ✅ 可选 Bilibili Cookie 配置，绕过风控
 - ✅ 弹幕密度限制，性能可控
 
-## 截图
-
-（播放 YouTube 视频，弹幕从右向左滚动，效果与 Bilibili 一致）
-
-## 系统要求
-
-| 项目 | 要求 |
-|------|------|
-| 设备 | iPhone / iPad（arm64 / arm64e） |
-| 系统 | iOS 14.0+（有根越狱 rootful） |
-| 越狱环境 | checkra1n / palera1n-rootful 等 |
-| YouTube 版本 | 任意（理论兼容，不同版本 Hook 点可能需微调） |
-| 编译工具链 | Theos + iPhone SDK |
-
 ## 安装
 
 ### 方式一：直接安装 deb
