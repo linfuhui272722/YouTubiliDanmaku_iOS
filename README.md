@@ -3,7 +3,7 @@
 > 将 Bilibili 弹幕移植到 YouTube iOS 应用 — 越狱插件 (Theos / Logos)
 
 本项目是 Chrome 扩展 [you-tubili-danmaku](https://gitee.com/Drom1145/you-tubili-danmaku) 的 iOS 越狱移植版。
-
+使用GLM-5.2开发
 在 **YouTube iOS 应用** 播放视频时，自动根据视频标题在 **Bilibili** 上搜索匹配的视频，拉取弹幕，并以原生 `UILabel` + `CADisplayLink` 的方式叠加在播放器上方渲染。
 
 ---
