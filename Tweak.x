@@ -30,6 +30,11 @@
 @end
 
 // ============================================================
+// 函数前向声明
+// ============================================================
+static BiliSearchResult *SelectBestMatch(NSArray<BiliSearchResult *> *results, NSString *title, NSString *channel);
+
+// ============================================================
 // 全局状态
 // ============================================================
 static DanmakuOverlayView *g_danmakuOverlay = nil;
@@ -127,10 +132,11 @@ static void CreateDanmakuButton() {
     // 自动布局
     g_danmakuButton.translatesAutoresizingMaskIntoConstraints = NO;
     [window addConstraints:@[
-        [NSLayoutConstraint constraintWithItem:g_danmakuButton attribute:NSLayoutAttributeTop relatedBy:NSLayoutAttributeEqual toItem:window.safeAreaLayoutGuide attribute:NSLayoutAttributeTop multiplier:1 constant:16],
-        [NSLayoutConstraint constraintWithItem:g_danmakuButton attribute:NSLayoutAttributeTrailing relatedBy:NSLayoutAttributeEqual toItem:window attribute:NSLayoutAttributeTrailing multiplier:1 constant:-16],
-        [NSLayoutConstraint constraintWithItem:g_danmakuButton attribute:NSLayoutAttributeWidth relatedBy:NSLayoutAttributeEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:buttonSize],
-        [NSLayoutConstraint constraintWithItem:g_danmakuButton attribute:NSLayoutAttributeHeight relatedBy:NSLayoutAttributeEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:buttonSize],
+        // 修改：NSLayoutAttributeEqual -> NSLayoutRelationEqual
+        [NSLayoutConstraint constraintWithItem:g_danmakuButton attribute:NSLayoutAttributeTop relatedBy:NSLayoutRelationEqual toItem:window.safeAreaLayoutGuide attribute:NSLayoutAttributeTop multiplier:1 constant:16],
+        [NSLayoutConstraint constraintWithItem:g_danmakuButton attribute:NSLayoutAttributeTrailing relatedBy:NSLayoutRelationEqual toItem:window attribute:NSLayoutAttributeTrailing multiplier:1 constant:-16],
+        [NSLayoutConstraint constraintWithItem:g_danmakuButton attribute:NSLayoutAttributeWidth relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:buttonSize],
+        [NSLayoutConstraint constraintWithItem:g_danmakuButton attribute:NSLayoutAttributeHeight relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:buttonSize],
     ]];
 }
 
@@ -270,6 +276,9 @@ static void LoadDanmakuForCurrentVideo() {
 }
 
 // 选择最佳匹配
+// 注意：此处去掉了 static 修饰符以匹配前向声明，或者保持 static 并确保前向声明也带有 static (推荐做法)
+// 但在 C 语言中，前向声明必须与定义完全匹配。这里保持 static 定义，前向声明也要加 static。
+// 修正：最上方的前向声明已添加 static。
 static BiliSearchResult *SelectBestMatch(NSArray<BiliSearchResult *> *results, NSString *title, NSString *channel) {
     if (results.count == 0) return nil;
     if (results.count == 1) return results[0];
