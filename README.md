@@ -30,7 +30,7 @@
 |------|------|
 | 设备 | iPhone / iPad（arm64 / arm64e） |
 | 系统 | iOS 14.0+（有根越狱 rootful） |
-| 越狱环境 | checkra1n / palera1n-rootful / Dopamine(rootful) 等 |
+| 越狱环境 | checkra1n / palera1n-rootful 等 |
 | YouTube 版本 | 任意（理论兼容，不同版本 Hook 点可能需微调） |
 | 编译工具链 | Theos + iPhone SDK |
 
