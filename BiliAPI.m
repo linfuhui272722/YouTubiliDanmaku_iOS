@@ -32,7 +32,7 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
 - (NSArray<Danmaku *> *)parseXMLDanmaku:(NSData *)data;
 - (Danmaku *)parseDanmakuElem:(NSData *)data;
 - (NSUInteger)readVarint:(const uint8_t *)bytes pos:(NSUInteger *)pos length:(NSUInteger)length;
-- (NSUInteger)skipField:(const uint8_t *)bytes pos:(NSUInteger)pos length:(NSUInteger)length wireType:(int)wireType;
+- (NSUInteger)skipField:(const uint8_t *)bytes pos:(NSUInteger *)pos length:(NSUInteger)length wireType:(int)wireType;
 @end
 
 #pragma mark - XML 解析器（旧版 XML 弹幕格式）
@@ -150,8 +150,8 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
                                                         timeoutInterval:15.0];
     [request setValue:kUserAgent forHTTPHeaderField:@"User-Agent"];
     [request setValue:kReferer forHTTPHeaderField:@"Referer"];
-    [request setValue:@"application/json, text/plain, */*", forHTTPHeaderField:@"Accept"];
-    [request setValue:@"zh-CN,zh;q=0.9", forHTTPHeaderField:@"Accept-Language"];
+    [request setValue:@"application/json, text/plain, */*" forHTTPHeaderField:@"Accept"];
+    [request setValue:@"zh-CN,zh;q=0.9" forHTTPHeaderField:@"Accept-Language"];
 
     // Cookie
     NSString *cookie = self.cookie;
