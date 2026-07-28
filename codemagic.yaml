@@ -1,0 +1,268 @@
+# Codemagic Configuration File
+# YouTubiliDanmaku - iOS 越狱插件 (Theos) 自动编译
+# 文档: https://docs.codemagic.io/yaml/yaml-getting-started/
+
+workflows:
+  youTubili-danmaku:
+    name: YouTubiliDanmaku Build
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    environment:
+      # 环境变量
+      vars:
+        # Theos 安装路径
+        THEOS_PATH: "/Users/builder/theos"
+        # SDK 版本（Codemagic 环境自带 Xcode，从中提取 SDK）
+        SDK_VERSION: "iPhoneOS16.5.sdk"
+        # 目标架构
+        ARCHS: "arm64 arm64e"
+        # deb 包版本号
+        PACKAGE_VERSION: "1.0.0"
+
+      # 使用 Xcode 最新版本（用于提取 iPhone SDK）
+      xcode: latest
+
+    # 触发条件：push 到任意分支、打 tag、PR
+    triggering:
+      events:
+        - push
+        - pull_request
+        - tag
+      branch_patterns:
+        - pattern: main
+          include: true
+        - pattern: master
+          include: true
+        - pattern: develop
+          include: true
+        - pattern: release/*
+          include: true
+      cancel_previous_builds: true
+
+    # 缓存 Theos，加速后续构建
+    cache:
+      cache_paths:
+        - $THEOS_PATH
+
+    # 构建脚本
+    scripts:
+      # ========== 步骤 1: 安装依赖 ==========
+      - name: Install dependencies
+        script: |
+          #!/bin/bash
+          set -e
+          echo "=== [1/6] 安装系统依赖 ==="
+
+          # 安装 Homebrew（如果不存在）
+          if ! command -v brew &> /dev/null; then
+            echo "安装 Homebrew..."
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          fi
+
+          # 安装编译所需工具
+          brew install ldid fakeroot dpkg || true
+          brew install perl || true
+
+          # 验证工具
+          echo "已安装工具："
+          command -v ldid && ldid -V || echo "ldid: 未找到"
+          command -v fakeroot && fakeroot -v || echo "fakeroot: 未找到"
+          command -v dpkg-deb && dpkg-deb --version | head -1 || echo "dpkg-deb: 未找到"
+
+      # ========== 步骤 2: 安装 Theos ==========
+      - name: Install Theos
+        script: |
+          #!/bin/bash
+          set -e
+          echo "=== [2/6] 安装 Theos ==="
+
+          THEOS_DIR="$THEOS_PATH"
+
+          if [ -d "$THEOS_DIR" ]; then
+            echo "Theos 已存在，跳过克隆"
+            # 更新到最新
+            cd "$THEOS_DIR" && git pull --rebase || true
+          else
+            echo "克隆 Theos..."
+            mkdir -p "$(dirname "$THEOS_DIR")"
+            git clone --recursive https://github.com/theos/theos.git "$THEOS_DIR"
+          fi
+
+          # 设置 Theos 环境变量（写入 profile）
+          echo "export THEOS=$THEOS_DIR" >> ~/.bashrc
+          echo "export PATH=\$THEOS/bin:\$PATH" >> ~/.bashrc
+          export THEOS=$THEOS_DIR
+          export PATH=$THEOS/bin:$PATH
+
+          # 验证 Theos
+          echo "Theos 版本："
+          $THEOS/bin/theos --version 2>/dev/null || echo "（theos 命令版本查询不支持，跳过）"
+          ls -la "$THEOS_DIR/makefiles" | head -5
+
+      # ========== 步骤 3: 准备 iPhone SDK ==========
+      - name: Prepare iPhone SDK
+        script: |
+          #!/bin/bash
+          set -e
+          echo "=== [3/6] 准备 iPhone SDK ==="
+
+          export THEOS=$THEOS_PATH
+          SDK_DIR="$THEOS/sdks"
+
+          # 查找 Xcode 中的 iPhone SDK
+          XCODE_PATH=$(xcode-select -p)
+          XCODE_ROOT=$(dirname $(dirname "$XCODE_PATH"))
+          SDK_SOURCE="$XCODE_ROOT/Platforms/iPhoneOS.platform/Developer/SDKs"
+
+          echo "Xcode 路径: $XCODE_PATH"
+          echo "SDK 源路径: $SDK_SOURCE"
+
+          # 列出可用的 SDK
+          echo "可用 SDK："
+          ls -la "$SDK_SOURCE/" 2>/dev/null || echo "未找到 SDK 源目录"
+
+          # 如果 Theos sdks 目录不存在，创建并链接
+          mkdir -p "$SDK_DIR"
+
+          # 查找最新的 iPhoneOS SDK
+          LATEST_SDK=$(ls -d "$SDK_SOURCE/iPhoneOS"*.sdk 2>/dev/null | sort -V | tail -1)
+          if [ -z "$LATEST_SDK" ]; then
+            echo "❌ 未找到 iPhoneOS SDK，尝试从 Xcode 下载"
+            xcodebuild -downloadPlatform iOS || true
+            LATEST_SDK=$(ls -d "$SDK_SOURCE/iPhoneOS"*.sdk 2>/dev/null | sort -V | tail -1)
+          fi
+
+          if [ -z "$LATEST_SDK" ]; then
+            echo "❌ 仍然未找到 SDK，尝试使用 Theos 的 SDK 下载脚本"
+            cd "$THEOS"
+            ./scripts/get-sdks || true
+          else
+            SDK_NAME=$(basename "$LATEST_SDK")
+            TARGET_LINK="$SDK_DIR/$SDK_NAME"
+
+            if [ -L "$TARGET_LINK" ] || [ -d "$TARGET_LINK" ]; then
+              echo "SDK 已链接: $TARGET_LINK"
+            else
+              echo "链接 SDK: $LATEST_SDK -> $TARGET_LINK"
+              ln -s "$LATEST_SDK" "$TARGET_LINK"
+            fi
+          fi
+
+          # 列出 Theos sdks 目录
+          echo "Theos SDKs 目录："
+          ls -la "$SDK_DIR/"
+
+      # ========== 步骤 4: 编译 Tweak ==========
+      - name: Build YouTubiliDanmaku
+        script: |
+          #!/bin/bash
+          set -e
+          echo "=== [4/6] 编译 YouTubiliDanmaku ==="
+
+          export THEOS=$THEOS_PATH
+          export PATH=$THEOS/bin:$PATH
+
+          # 进入项目目录（Codemagic 默认 checkout 到 $CM_BUILD_DIR 或当前目录）
+          PROJECT_DIR="$CM_BUILD_DIR"
+          if [ -z "$PROJECT_DIR" ]; then
+            PROJECT_DIR=$(pwd)
+          fi
+          echo "项目目录: $PROJECT_DIR"
+
+          cd "$PROJECT_DIR"
+
+          # 验证文件
+          echo "项目文件："
+          ls -la *.x *.m *.h Makefile *.plist control 2>/dev/null
+
+          # 清理旧构建
+          echo "清理旧构建..."
+          make clean 2>/dev/null || true
+          rm -rf packages/ .theos/ obj/ 2>/dev/null || true
+
+          # 编译
+          echo "开始编译..."
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootful
+
+          # 验证 deb
+          echo "=== 编译结果 ==="
+          ls -la packages/ 2>/dev/null || {
+            echo "❌ packages/ 目录不存在，检查 .theos/obj/ 目录"
+            ls -la .theos/ 2>/dev/null
+            find . -name "*.dylib" -o -name "*.deb" 2>/dev/null
+            exit 1
+          }
+
+          DEB_FILE=$(ls packages/*.deb 2>/dev/null | head -1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "❌ 未找到 .deb 文件"
+            find . -name "*.deb" 2>/dev/null
+            exit 1
+          fi
+
+          echo "✅ 编译成功: $DEB_FILE"
+          dpkg-deb --info "$DEB_FILE"
+          echo ""
+          echo "=== deb 内容 ==="
+          dpkg-deb --contents "$DEB_FILE"
+
+      # ========== 步骤 5: 重命名 deb（带版本号） ==========
+      - name: Rename deb package
+        script: |
+          #!/bin/bash
+          set -e
+          echo "=== [5/6] 重命名 deb 包 ==="
+
+          PROJECT_DIR="${CM_BUILD_DIR:-$(pwd)}"
+          cd "$PROJECT_DIR"
+
+          DEB_FILE=$(ls packages/*.deb 2>/dev/null | head -1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "❌ 未找到 deb 文件"
+            exit 1
+          fi
+
+          # 重命名为带版本号的名称
+          NEW_NAME="packages/YouTubiliDanmaku_${PACKAGE_VERSION}_iphoneos-arm.deb"
+          cp "$DEB_FILE" "$NEW_NAME"
+          echo "✅ 重命名为: $NEW_NAME"
+          ls -la packages/
+
+    # ========== 步骤 6: 构建产物 ==========
+    artifacts:
+      # deb 安装包
+      - packages/*.deb
+      # 编译日志（用于调试）
+      - .theos/obj/**/*.log
+      # 如果有 dSYM
+      - .theos/obj/**/*.dylib
+
+    # 发布配置
+    publishing:
+      # GitHub Release（打 tag 时自动发布）
+      github:
+        tag: "v${PACKAGE_VERSION}"
+        release_notes: |
+          ## YouTubiliDanmaku v${PACKAGE_VERSION}
+
+          ### 安装方法
+          1. 下载 `YouTubiliDanmaku_${PACKAGE_VERSION}_iphoneos-arm.deb`
+          2. 通过 Filza / SSH 拷贝到设备
+          3. 执行 `dpkg -i YouTubiliDanmaku_${PACKAGE_VERSION}_iphoneos-arm.deb`
+          4. 注销（respring）
+          5. 打开 YouTube 应用，播放视频即可看到弹幕
+
+          ### 功能
+          - 自动根据 YouTube 视频标题搜索 Bilibili 同名视频
+          - 支持 protobuf + XML 双格式弹幕解析
+          - 滚动/顶部/底部/逆向弹幕全模式
+          - 设置面板：不透明度、字体、速度、显示区域
+
+      # 邮件通知
+      email:
+        recipients:
+          - your-email@example.com  # ← 替换为你的邮箱
+        notify:
+          success: true
+          failure: true

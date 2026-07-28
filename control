@@ -1,0 +1,9 @@
+Package: com.youtubili.danmaku
+Name: YouTubiliDanmaku
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Display Bilibili danmaku on YouTube iOS app
+Maintainer: YouTubili
+Author: YouTubili
+Section: Tweaks
+Depends: mobilesubstrate
