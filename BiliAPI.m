@@ -32,7 +32,8 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
 - (NSArray<Danmaku *> *)parseXMLDanmaku:(NSData *)data;
 - (Danmaku *)parseDanmakuElem:(NSData *)data;
 - (NSUInteger)readVarint:(const uint8_t *)bytes pos:(NSUInteger *)pos length:(NSUInteger)length;
-- (NSUInteger)skipField:(const uint8_t *)bytes pos:(NSUInteger *)pos length:(NSUInteger)length wireType:(int)wireType;
+// 修复：将参数类型从 NSUInteger * 修改为 NSUInteger
+- (NSUInteger)skipField:(const uint8_t *)bytes pos:(NSUInteger)pos length:(NSUInteger)length wireType:(int)wireType;
 @end
 
 #pragma mark - XML 解析器（旧版 XML 弹幕格式）
@@ -491,6 +492,7 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
             }
             pos += len;
         } else {
+            // 调用处传递的是值 pos，方法声明和实现也应匹配
             pos = [self skipField:bytes pos:pos length:length wireType:wireType];
             if (pos == 0 || pos > length) break;
         }
@@ -537,6 +539,7 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
             }
             pos += len;
         } else {
+            // 调用处传递的是值 pos，方法声明和实现也应匹配
             pos = [self skipField:bytes pos:pos length:length wireType:wireType];
             if (pos == 0 || pos > length) break;
         }
@@ -560,6 +563,7 @@ static NSString *const kReferer    = @"https://www.bilibili.com";
     return result;
 }
 
+// 方法实现：pos 是值类型
 - (NSUInteger)skipField:(const uint8_t *)bytes pos:(NSUInteger)pos length:(NSUInteger)length wireType:(int)wireType {
     switch (wireType) {
         case 0: { // Varint
