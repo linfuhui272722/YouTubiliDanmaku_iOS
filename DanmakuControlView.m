@@ -262,9 +262,10 @@
     // 自动布局
     slider.translatesAutoresizingMaskIntoConstraints = NO;
     [cell.contentView addConstraints:@[
-        [NSLayoutConstraint constraintWithItem:slider attribute:NSLayoutAttributeCenterY relatedBy:NSLayoutAttributeEqual toItem:cell.contentView attribute:NSLayoutAttributeCenterY multiplier:1 constant:0],
-        [NSLayoutConstraint constraintWithItem:slider attribute:NSLayoutAttributeTrailing relatedBy:NSLayoutAttributeEqual toItem:cell.contentView attribute:NSLayoutAttributeTrailing multiplier:1 constant:-16],
-        [NSLayoutConstraint constraintWithItem:slider attribute:NSLayoutAttributeWidth relatedBy:NSLayoutAttributeEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:180],
+        // 修复：relatedBy:NSLayoutAttributeEqual -> relatedBy:NSLayoutRelationEqual
+        [NSLayoutConstraint constraintWithItem:slider attribute:NSLayoutAttributeCenterY relatedBy:NSLayoutRelationEqual toItem:cell.contentView attribute:NSLayoutAttributeCenterY multiplier:1 constant:0],
+        [NSLayoutConstraint constraintWithItem:slider attribute:NSLayoutAttributeTrailing relatedBy:NSLayoutRelationEqual toItem:cell.contentView attribute:NSLayoutAttributeTrailing multiplier:1 constant:-16],
+        [NSLayoutConstraint constraintWithItem:slider attribute:NSLayoutAttributeWidth relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:180],
     ]];
 
     // 让 detailTextLabel 不挡住 slider
