@@ -3,8 +3,6 @@ INSTALL_TARGET_PROCESSES = YouTube
 
 ARCHS = arm64 
 
-THEOS_PACKAGE_SCHEME = rootless
-
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = YouTubiliDanmaku
