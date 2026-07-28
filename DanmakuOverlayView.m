@@ -15,10 +15,10 @@ static const CGFloat kTrackHeight = 32;
 static const NSTimeInterval kScrollDuration = 8.0;
 // 固定弹幕显示时长（秒）
 static const NSTimeInterval kFixedDuration = 4.0;
-// 滚动弹幕轨道数
-static const int kScrollTrackCount = 12;
-// 固定弹幕轨道数
-static const int kFixedTrackCount = 6;
+
+// 修复：使用 #define 宏定义数组大小，确保编译期常量
+#define kScrollTrackCount 12
+#define kFixedTrackCount 6
 
 // 单条滚动弹幕的运行时数据
 @interface ScrollDanmakuItem : NSObject
@@ -64,6 +64,7 @@ static const int kFixedTrackCount = 6;
     NSMutableArray<FixedDanmakuItem *> *_activeFixedItems;
 
     // 轨道占用时间（用于分配轨道）
+    // 使用宏定义确保数组大小是编译期常量
     NSTimeInterval _scrollTrackAvailable[kScrollTrackCount];
     NSTimeInterval _topTrackAvailable[kFixedTrackCount];
     NSTimeInterval _bottomTrackAvailable[kFixedTrackCount];
